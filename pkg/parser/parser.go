@@ -1,6 +1,9 @@
 package parser
 
 import (
+	"fmt"
+	"io"
+	"io/ioutil"
 	"path/filepath"
 
 	"github.com/instrumenta/conftest/pkg/parser/cue"
@@ -16,6 +19,60 @@ type Parser interface {
 	Unmarshal(p []byte, v interface{}) error
 }
 
+// ReadUnmarshaller is an interface that allows for bulk unmarshalling
+// and setting of io.Readers to be unmarshalled.
+type ReadUnmarshaller interface {
+	BulkUnmarshal() (interface{}, error)
+	SetReaders(fileList []io.Reader) error
+}
+
+// ConfigManager the implementation of ReadUnmarshaller and io.Reader
+// byte storage.
+type ConfigManager struct {
+	parser         Parser
+	configContents [][]byte
+}
+
+// BulkUnmarshal iterates through the given cached io.Readers and
+// runs the requested parser on the data.
+func (s *ConfigManager) BulkUnmarshal() (interface{}, error) {
+	var allContents []interface{}
+	for _, config := range s.configContents {
+		var singleContent interface{}
+		err := s.parser.Unmarshal(config, &singleContent)
+		if err != nil {
+			return nil, fmt.Errorf("we should not have any errors on unmarshalling: %v", err)
+		}
+		allContents = append(allContents, singleContent)
+	}
+	return allContents, nil
+}
+
+// SetReaders stores the io.Readers for use in later functions.
+func (s *ConfigManager) SetReaders(readerList []io.Reader) error {
+	s.configContents = make([][]byte, 0)
+	for _, reader := range readerList {
+		if reader == nil {
+			return fmt.Errorf("we recieved a nil reader, which should not happen")
+		}
+		contents, err := ioutil.ReadAll(reader)
+		if err != nil {
+			return fmt.Errorf("Error while reading Reader contents; err is: %s", err)
+		}
+		s.configContents = append(s.configContents, contents)
+	}
+	return nil
+}
+
+// NewConfigManager is the instatiation function for ConfigManager
+func NewConfigManager(fileType string) ReadUnmarshaller {
+
+	return &ConfigManager{
+		parser: GetParser(fmt.Sprintf("file.%s", fileType)),
+	}
+}
+
+// GetParser gets a parser that works on a given filename
 func GetParser(fileName string) Parser {
 	suffix := filepath.Ext(fileName)
 

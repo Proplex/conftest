@@ -39,7 +39,7 @@ type checkResult struct {
 }
 
 // NewTestCommand creates a new test command
-func NewTestCommand() *cobra.Command {
+func NewTestCommand(osExit func(int)) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:     "test <file> [file...]",
@@ -63,7 +63,7 @@ func NewTestCommand() *cobra.Command {
 				log.G(ctx).Fatalf("Problem building rego compiler: %s", err)
 			}
 
-			out := getOutputManager(viper.GetString("output"), !viper.GetBool("no-color"))
+			out := newDefaultStdOutputManager(!viper.GetBool("no-color"))
 
 			foundFailures := false
 			for _, fileName := range args {
@@ -88,24 +88,17 @@ func NewTestCommand() *cobra.Command {
 				}
 			}
 
-			err = out.flush()
-			if err != nil {
-				log.G(ctx).Fatal(err)
-			}
-
 			if foundFailures {
-				os.Exit(1)
+				osExit(1)
 			}
 		},
 	}
 
 	cmd.Flags().BoolP("fail-on-warn", "", false, "return a non-zero exit code if only warnings are found")
 	cmd.Flags().BoolP("update", "", false, "update any policies before running the tests")
-	cmd.Flags().StringP("output", "o", "", fmt.Sprintf("output format for conftest results - valid options are: %s", validOutputs()))
 
 	viper.BindPFlag("fail-on-warn", cmd.Flags().Lookup("fail-on-warn"))
 	viper.BindPFlag("update", cmd.Flags().Lookup("update"))
-	viper.BindPFlag("output", cmd.Flags().Lookup("output"))
 
 	return cmd
 }
@@ -124,34 +117,33 @@ func buildRego(trace bool, query string, input interface{}, compiler *ast.Compil
 	return regoObj, buf
 }
 
-func detectLineBreak(haystack []byte) string {
-	windowsLineEnding := bytes.Contains(haystack, []byte("\r\n"))
-	if windowsLineEnding && runtime.GOOS == "windows" {
-		return "\r\n"
-	}
-	return "\n"
-}
-
 func processFile(ctx context.Context, fileName string, compiler *ast.Compiler) (checkResult, error) {
-	var data []byte
+	var configurations []parser.ConfigDoc
 	var err error
 
 	if fileName == "-" {
 		reader := bufio.NewReader(os.Stdin)
-		data, err = ioutil.ReadAll(reader)
+//		data, err = ioutil.ReadAll(reader)
 	} else {
 		filePath, _ := filepath.Abs(fileName)
-		data, err = ioutil.ReadFile(filePath)
+		fileReader, err := os.Open(filePath)
+
+		if err != nil {
+			return checkResult{}, fmt.Errorf("Unable to open file %s: %s", fileName, err)
+		}
+
+		configurations = append(configurations, parser.ConfigDoc{
+			Reader: fileReader,
+			Filepath: filePath,
+		})
+	
 	}
 
-	if err != nil {
-		return checkResult{}, fmt.Errorf("Unable to open file %s: %s", fileName, err)
-	}
 
-	linebreak := detectLineBreak(data)
-	bits := bytes.Split(data, []byte(linebreak+"---"+linebreak))
 
-	p := parser.GetParser(fileName)
+	configManager := parser.NewConfigManager("yml")
+	parsedConfigs, err := configManager.BulkUnmarshal(configurations)
+
 
 	var failures []error
 	var warnings []error
@@ -286,9 +278,6 @@ func buildCompiler(path string) (*ast.Compiler, error) {
 	var dirPath string
 	if info.IsDir() {
 		files, err = ioutil.ReadDir(path)
-		if err != nil {
-			return nil, err
-		}
 		dirPath = path
 	} else {
 		files = []os.FileInfo{info}
